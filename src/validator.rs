@@ -675,7 +675,7 @@ pub fn check_arg_path_safety(arg: &str) -> Result<(), String> {
 }
 
 /// Check a path string for absolute paths and path traversal.
-fn check_path_value(value: &str) -> Result<(), String> {
+pub fn check_path_value(value: &str) -> Result<(), String> {
     if value.starts_with('/') {
         return Err(format!("absolute path '{}' in argument not allowed", value));
     }

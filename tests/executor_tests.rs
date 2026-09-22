@@ -3170,52 +3170,80 @@ const EVIL_SGCONFIG: &str =
     "customLanguages:\n  evil:\n    libraryPath: evil.so\n    extensions: [evil]\n";
 
 #[test]
-fn test_ast_grep_ignores_discovered_project_config() {
-    if !has_ast_grep() {
-        return;
-    }
-    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_ignored");
+fn test_ast_grep_rejects_project_config_with_custom_languages() {
+    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_custom_lang");
     let sub = workdir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(workdir.join("sgconfig.yml"), EVIL_SGCONFIG).unwrap();
-    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
-    std::fs::write(sub.join("b.rs"), "fn main() { let y = 1; }\n").unwrap();
 
-    let inline_rule =
-        "ast-grep scan --inline-rules 'id: x\nlanguage: rust\nrule: {pattern: let $X = 1}' .";
-    // ast-grep walks up from its cwd, so running in `sub` must also ignore the parent's config.
+    // ast-grep loads the config before parsing args, so every form must be refused,
+    // including from a subdirectory (ast-grep walks up from its cwd).
     for (dir, cmd) in [
         (&workdir, "ast-grep run -p 'let $X = 1' -l rust ."),
         (&workdir, "ast-grep -p 'let $X = 1' -l rust ."),
-        (&workdir, inline_rule),
+        (&workdir, "ast-grep scan"),
         (&workdir, "ast-grep outline a.rs"),
         (&workdir, "ast-grep --version"),
-        (&workdir, "ast-grep --help"),
         (&workdir, "ast-grep help run"),
-        (&workdir, "ast-grep completions zsh"),
         (&sub, "ast-grep run -p 'let $X = 1' -l rust ."),
     ] {
         let output = rsh_bin().arg("--dir").arg(dir).arg(cmd).output().unwrap();
+        assert!(!output.status.success(), "{} should be rejected", cmd);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success(),
+            stderr.contains("'customLanguages' is not allowed"),
             "{} in {}: {}",
             cmd,
             dir.display(),
-            String::from_utf8_lossy(&output.stderr)
+            stderr
         );
     }
     std::fs::remove_dir_all(&workdir).unwrap();
 }
 
 #[test]
-fn test_ast_grep_ignores_config_written_earlier_in_script() {
-    if !has_ast_grep() {
-        return;
+fn test_ast_grep_rejects_sgconfig_yaml_and_bad_rule_dirs() {
+    for (dir, name, contents, expected) in [
+        (
+            "rsh_test_sgconfig_yaml_ext",
+            "sgconfig.yaml",
+            EVIL_SGCONFIG,
+            "customLanguages",
+        ),
+        (
+            "rsh_test_sgconfig_abs_rules",
+            "sgconfig.yml",
+            "ruleDirs: [/etc]\n",
+            "absolute path",
+        ),
+        (
+            "rsh_test_sgconfig_unknown_key",
+            "sgconfig.yml",
+            "ruleDirs: [rules]\nnewThing: 1\n",
+            "not allowed",
+        ),
+    ] {
+        let workdir = std::env::temp_dir().join(dir);
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join(name), contents).unwrap();
+        let output = rsh_bin()
+            .arg("--dir")
+            .arg(&workdir)
+            .arg("ast-grep run -p x")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{}: {}", dir, stderr);
+        std::fs::remove_dir_all(&workdir).unwrap();
     }
+}
+
+#[test]
+fn test_ast_grep_rejects_custom_languages_written_earlier_in_script() {
     let workdir = std::env::temp_dir().join("rsh_test_sgconfig_written");
     let _ = std::fs::remove_dir_all(&workdir);
     std::fs::create_dir_all(&workdir).unwrap();
-    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
     let output = rsh_bin()
         .arg("--allow-redirects")
         .arg("--dir")
@@ -3226,16 +3254,50 @@ fn test_ast_grep_ignores_config_written_earlier_in_script() {
         ))
         .output()
         .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
+        stderr.contains("'customLanguages' is not allowed"),
         "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr
     );
-    assert!(
-        std::fs::read_to_string(workdir.join("sgconfig.yml"))
-            .unwrap()
-            .contains("libraryPath")
-    );
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_ast_grep_uses_project_rules() {
+    if !has_ast_grep() {
+        return;
+    }
+    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_rules");
+    let _ = std::fs::remove_dir_all(&workdir);
+    let src = workdir.join("src");
+    std::fs::create_dir_all(workdir.join("rules")).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(workdir.join("sgconfig.yml"), "ruleDirs: [rules]\n").unwrap();
+    std::fs::write(
+        workdir.join("rules/no-one.yml"),
+        "id: no-one\nlanguage: rust\nseverity: error\nmessage: found one\nrule: {pattern: let $X = 1}\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+
+    // From the root and from a subdirectory, scan should pick up the project rule.
+    for dir in [&workdir, &src] {
+        let output = rsh_bin()
+            .arg("--dir")
+            .arg(dir)
+            .arg("ast-grep scan --report-style short")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("no-one") && stdout.contains("a.rs"),
+            "in {}: stdout: {} stderr: {}",
+            dir.display(),
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     std::fs::remove_dir_all(&workdir).unwrap();
 }
 
@@ -3266,4 +3328,38 @@ fn test_ast_grep_search_works() {
 fn test_fd_exec_blocked_in_cluster_with_attached_value() {
     // fd -Hxpython3 is -H -x python3; the digit must not hide -x.
     assert_rejected_with("fd -Hxpython3 .", "'-x' flag on 'fd'");
+}
+
+#[test]
+fn test_ast_grep_config_swap_in_pipeline_not_loaded() {
+    // One stage rewrites a safe sgconfig.yml to add customLanguages while the next
+    // stage starts. If ast-grep re-read the project file instead of rsh's validated
+    // copy, this loaded the swapped config in ~1/3 of runs.
+    if !has_ast_grep() {
+        return;
+    }
+    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_swap");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    let cmd = "ast-grep run -p 'ruleDirs: $A' \
+        -r 'customLanguages: {evil: {libraryPath: evil.so, extensions: [evil]}}' \
+        -l yaml -U sgconfig.yml | ast-grep run -p 'let $X = 1' -l rust a.rs";
+    for _ in 0..20 {
+        std::fs::write(workdir.join("sgconfig.yml"), "ruleDirs: []\n").unwrap();
+        let output = rsh_bin()
+            .arg("--allow-redirects")
+            .arg("--dir")
+            .arg(&workdir)
+            .arg(cmd)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("custom language"),
+            "swapped config was loaded: {}",
+            stderr
+        );
+    }
+    std::fs::remove_dir_all(&workdir).unwrap();
 }

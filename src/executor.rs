@@ -9,6 +9,7 @@ use brush_parser::ast::*;
 use brush_parser::word::{self, Parameter, ParameterExpr, WordPiece};
 
 use crate::allowlist::{self, Allowlist};
+use crate::ast_grep as rsh_ast_grep;
 use crate::glob as rsh_glob;
 use crate::sed as rsh_sed;
 use crate::validator::{self, ValidatorConfig};
@@ -96,6 +97,8 @@ pub struct Executor {
     max_output: usize,
     inherit_env: bool,
     substitution_depth: std::cell::Cell<usize>,
+    /// Validated ast-grep config copies, kept until the Executor is dropped.
+    ast_grep_configs: std::cell::RefCell<Vec<rsh_ast_grep::TempConfig>>,
 }
 
 impl Executor {
@@ -113,6 +116,7 @@ impl Executor {
             max_output,
             inherit_env,
             substitution_depth: std::cell::Cell::new(0),
+            ast_grep_configs: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -557,7 +561,9 @@ impl Executor {
         validator::check_blocked_flags_expanded(&name, &args, self.allow_redirects)?;
 
         let args = if name == "ast-grep" {
-            ast_grep_args(args)
+            let (args, config) = rsh_ast_grep::prepare_args(args, &self.working_dir)?;
+            self.ast_grep_configs.borrow_mut().extend(config);
+            args
         } else {
             args
         };
@@ -1259,73 +1265,5 @@ fn shell_pattern_matches(pattern: &str, value: &str) -> bool {
     match glob_pattern {
         Ok(p) => p.matches(value),
         Err(_) => pattern == value,
-    }
-}
-
-/// ast-grep auto-discovers sgconfig.yml from its cwd upward and dlopen()s any
-/// `customLanguages.*.libraryPath` in it, before parsing args, for every
-/// subcommand. It skips discovery when argv contains `-c <file>`, so we always
-/// pass an empty config (user `-c` is blocked, so nothing overrides it).
-/// Placement only matters for clap accepting the command, not for safety.
-fn ast_grep_args(args: Vec<String>) -> Vec<String> {
-    let config = ["-c".to_string(), "/dev/null".to_string()];
-    let first = args.first().map(String::as_str).unwrap_or("");
-    let mut out = Vec::with_capacity(args.len() + 3);
-    match first {
-        "run" | "scan" | "outline" | "completions" => {
-            out.push(args[0].clone());
-            out.extend(config);
-            out.extend_from_slice(&args[1..]);
-        }
-        // Default-run form (`ast-grep -p x`) rejects -c, so make `run` explicit.
-        f if f.starts_with('-') && !matches!(f, "-h" | "--help" | "-V" | "--version") => {
-            out.push("run".to_string());
-            out.extend(config);
-            out.extend(args);
-        }
-        _ => {
-            out.extend(config);
-            out.extend(args);
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ast_grep_args;
-
-    fn rewrite(args: &[&str]) -> Vec<String> {
-        ast_grep_args(args.iter().map(|s| s.to_string()).collect())
-    }
-
-    #[test]
-    fn test_ast_grep_args_inject_empty_config() {
-        let cases: &[(&[&str], &[&str])] = &[
-            (&["run", "-p", "x"], &["run", "-c", "/dev/null", "-p", "x"]),
-            (
-                &["scan", "-r", "r.yml"],
-                &["scan", "-c", "/dev/null", "-r", "r.yml"],
-            ),
-            (
-                &["outline", "a.rs"],
-                &["outline", "-c", "/dev/null", "a.rs"],
-            ),
-            (
-                &["completions", "zsh"],
-                &["completions", "-c", "/dev/null", "zsh"],
-            ),
-            (
-                &["-p", "x", "."],
-                &["run", "-c", "/dev/null", "-p", "x", "."],
-            ),
-            (&["--help"], &["-c", "/dev/null", "--help"]),
-            (&["-V"], &["-c", "/dev/null", "-V"]),
-            (&["help", "run"], &["-c", "/dev/null", "help", "run"]),
-            (&[], &["-c", "/dev/null"]),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(rewrite(input), *expected, "input: {:?}", input);
-        }
     }
 }

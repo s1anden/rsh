@@ -233,7 +233,7 @@ fn test_find_pipe_wc_count_files() {
     // Count the number of .rs source files
     let out = run_ok("find src -name '*.rs' -type f | wc -l");
     let count: i32 = out.trim().parse().unwrap();
-    assert_eq!(count, 8, "expected 8 source files, got {}", count);
+    assert_eq!(count, 9, "expected 9 source files, got {}", count);
 }
 
 #[test]
