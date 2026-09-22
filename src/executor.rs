@@ -556,6 +556,10 @@ impl Executor {
         // for-loop variables, globs) can produce blocked flags at runtime.
         validator::check_blocked_flags_expanded(&name, &args)?;
 
+        if name == "ast-grep" {
+            self.check_no_ast_grep_config()?;
+        }
+
         Ok((name, args, redirects, stderr_behavior))
     }
 
@@ -1057,6 +1061,27 @@ impl Executor {
     }
 
     // --- Path checking ---
+
+    /// ast-grep auto-discovers sgconfig.yml from its cwd upward and dlopen()s any
+    /// `customLanguages.*.libraryPath` in it, even for plain `ast-grep run`.
+    /// Checked right before spawn so an earlier `echo > sgconfig.yml` is caught.
+    fn check_no_ast_grep_config(&self) -> Result<(), String> {
+        let dir = self
+            .working_dir
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve working directory: {}", e))?;
+        for ancestor in dir.ancestors() {
+            for name in ["sgconfig.yml", "sgconfig.yaml"] {
+                if ancestor.join(name).exists() {
+                    return Err(format!(
+                        "ast-grep is not allowed when an ast-grep project config is present ({}); it can load native code",
+                        ancestor.join(name).display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 
     /// Check expanded argument values for absolute paths and path traversal.
     fn check_expanded_arg_path(&self, arg: &str) -> Result<(), String> {

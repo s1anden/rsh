@@ -3036,3 +3036,148 @@ fn test_multi_arg_disallowed_command() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("not in allowlist"), "stderr: {}", stderr);
 }
+
+// ---- ast-grep restrictions ----
+
+#[test]
+fn test_ast_grep_write_and_config_flags_blocked() {
+    for cmd in [
+        "ast-grep run -p x -r y -U",
+        "ast-grep run -p x -r y --update-all",
+        "ast-grep scan -U",
+        "ast-grep run -p x -i",
+        "ast-grep run -p x --interactive",
+        "ast-grep run -p x -c cfg.yml",
+        "ast-grep run -p x -ccfg.yml",
+        "ast-grep run -p x --config=cfg.yml",
+        "ast-grep --config cfg.yml run -p x",
+    ] {
+        assert_rejected_with(cmd, "not allowed");
+    }
+}
+
+#[test]
+fn test_ast_grep_flags_blocked_in_clusters() {
+    // -Uj4 is parsed by clap as -U -j 4; the trailing value must not hide -U.
+    assert_rejected_with("ast-grep run -p x -r y -jU4", "'-U' flag on 'ast-grep'");
+    assert_rejected_with(
+        "ast-grep run -p x -r y -Uj4",
+        "flag on 'ast-grep' is not allowed",
+    );
+    assert_rejected_with("ast-grep run -p x -r y -iU", "not allowed");
+}
+
+#[test]
+fn test_ast_grep_flags_blocked_after_expansion() {
+    assert_rejected_with("ast-grep run -p x -r y $(echo -U)", "not allowed");
+    assert_rejected_with(
+        "for f in --config=c.yml; do ast-grep run -p x $f; done",
+        "not allowed",
+    );
+}
+
+#[test]
+fn test_ast_grep_blocked_subcommands() {
+    for sub in ["new", "lsp", "test"] {
+        assert_rejected_with(&format!("ast-grep {}", sub), &format!("'ast-grep {}'", sub));
+    }
+    assert_rejected_with(
+        "for s in new; do ast-grep $s project; done",
+        "'ast-grep new'",
+    );
+}
+
+#[test]
+fn test_ast_grep_subcommand_names_allowed_as_values() {
+    // Only the first arg is the subcommand; `new` as a path must not trip the check.
+    let output = rsh_bin().arg("ast-grep run -p x new").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("not allowed"), "stderr: {}", stderr);
+}
+
+#[test]
+fn test_sg_alias_not_allowed() {
+    // `sg` is shadow-utils' switch-group command on Linux, which runs arbitrary commands.
+    assert_not_in_allowlist("sg -p x");
+}
+
+#[test]
+fn test_ast_grep_rejected_when_project_config_present() {
+    for (dir, name) in [
+        ("rsh_test_sgconfig_yml", "sgconfig.yml"),
+        ("rsh_test_sgconfig_yaml", "sgconfig.yaml"),
+    ] {
+        let workdir = std::env::temp_dir().join(dir);
+        let sub = workdir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(workdir.join(name), "customLanguages: {}\n").unwrap();
+
+        // ast-grep walks up from its cwd, so a config in a parent counts too.
+        for d in [&workdir, &sub] {
+            let output = rsh_bin()
+                .arg("--dir")
+                .arg(d)
+                .arg("ast-grep run -p x")
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("project config is present"),
+                "stderr: {}",
+                stderr
+            );
+        }
+        std::fs::remove_dir_all(&workdir).unwrap();
+    }
+}
+
+#[test]
+fn test_ast_grep_rejected_when_config_written_earlier_in_script() {
+    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_written");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).unwrap();
+    let output = rsh_bin()
+        .arg("--allow-redirects")
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("echo 'customLanguages: {}' > sgconfig.yml; ast-grep run -p x")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("project config is present"),
+        "stderr: {}",
+        stderr
+    );
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_ast_grep_search_works() {
+    if Command::new("ast-grep").arg("--version").output().is_err() {
+        return; // ast-grep not installed
+    }
+    let workdir = std::env::temp_dir().join("rsh_test_ast_grep_search");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    let output = rsh_bin()
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("ast-grep run -p 'let $X = 1' -l rust .")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("let x = 1"));
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_fd_exec_blocked_in_cluster_with_attached_value() {
+    // fd -Hxpython3 is -H -x python3; the digit must not hide -x.
+    assert_rejected_with("fd -Hxpython3 .", "'-x' flag on 'fd'");
+}

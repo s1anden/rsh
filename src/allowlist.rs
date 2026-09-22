@@ -6,7 +6,9 @@ use std::collections::HashSet;
 
 const DEFAULT_ALLOWLIST: &[&str] = &[
     // Search
-    "grep", "rg", "ugrep", // Find files
+    "grep", "rg", "ugrep",
+    "ast-grep", // see validator.rs + executor.rs for its restrictions; never `sg` (Linux setgid tool)
+    // Find files
     "find", "fd", // Read files
     "cat", "bat", "head", "tail", // List/inspect
     "ls", "eza", "tree", "stat", "file", "du", "wc", "pwd", "which",

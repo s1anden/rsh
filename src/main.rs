@@ -42,6 +42,7 @@ pub fn prime_text(al: &Allowlist, allow_redirects: bool) -> String {
     let cmds = al.allowed_commands().join(", ");
     let has_rg = has_command("rg");
     let has_fd = has_command("fd");
+    let has_ast_grep = has_command("ast-grep");
 
     let redirect_note = if allow_redirects {
         ""
@@ -88,6 +89,7 @@ sed (restricted — line extraction only):
 Not allowed:
 - Commands outside the allowlist above — the allowlist is fixed and cannot be changed
 - find -exec / -execdir (use command substitution or for-loops instead)
+- ast-grep -U / -i / -c, ast-grep new / lsp / test, and ast-grep in any directory with an sgconfig.yml
 - Instead of: find . | xargs grep pattern → use: grep -r pattern . OR grep pattern $(find . -name '*.ext')
 - Function definitions, background execution (&), process substitution{redirect_note}
 
@@ -106,6 +108,9 @@ Patterns for multi-step reads:\n"
     );
     if has_fd {
         s.push_str("  fd -e rs | head -20                        # find files by extension\n");
+    }
+    if has_ast_grep {
+        s.push_str("  ast-grep -p 'fn $NAME($$$)' -l rust .     # structural (AST) search\n");
     }
     s.push_str(
         "  tree -L 2 .                                    # overview of directory structure\n",

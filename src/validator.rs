@@ -27,7 +27,25 @@ const UNCONDITIONALLY_BLOCKED: &[(&str, &[&str])] = &[
 ];
 
 /// Flags blocked by prefix match (e.g., sort -o, sort -ofoo all blocked).
-const PREFIX_BLOCKED: &[(&str, &[&str])] = &[("sort", &["-o", "--output"])];
+const PREFIX_BLOCKED: &[(&str, &[&str])] = &[
+    ("sort", &["-o", "--output"]),
+    // -U/-i rewrite files (and -i can spawn $EDITOR). -c loads a config whose
+    // customLanguages.libraryPath is dlopen'd, i.e. arbitrary native code.
+    (
+        "ast-grep",
+        &[
+            "-U",
+            "--update-all",
+            "-i",
+            "--interactive",
+            "-c",
+            "--config",
+        ],
+    ),
+];
+
+/// ast-grep subcommands that write files (new, test -U) or run a long-lived server (lsp).
+const AST_GREP_BLOCKED_SUBCOMMANDS: &[&str] = &["new", "lsp", "test"];
 
 /// Configuration passed into the validator.
 pub struct ValidatorConfig {
@@ -681,6 +699,15 @@ fn check_path_value(value: &str) -> Result<(), String> {
 /// Used at validation time (on literal args) and at execution time (on expanded args)
 /// to catch blocked flags like `find -delete` or `sort -o`.
 pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
+    // ast-grep's only top-level flags are -c (blocked), -h, -V, so the first
+    // arg is always the subcommand or a flag.
+    if cmd == "ast-grep"
+        && let Some(sub) = args
+            .first()
+            .filter(|a| AST_GREP_BLOCKED_SUBCOMMANDS.contains(a))
+    {
+        return Err(format!("'ast-grep {}' is not allowed", sub));
+    }
     if let Some((_, blocked_flags)) = UNCONDITIONALLY_BLOCKED.iter().find(|(c, _)| *c == cmd) {
         for arg in args {
             if blocked_flags.contains(arg) {
@@ -700,10 +727,7 @@ pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
         for arg in args {
             for prefix in *blocked_prefixes {
                 if arg.starts_with(prefix) {
-                    return Err(format!(
-                        "'{}' flag on '{}' is not allowed (writes files in place)",
-                        arg, cmd
-                    ));
+                    return Err(format!("'{}' flag on '{}' is not allowed", arg, cmd));
                 }
             }
             // Catch blocked single-letter prefix flags in combined clusters:
@@ -711,7 +735,7 @@ pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
             // the prefix check on `-o`.
             if let Some(matched) = find_blocked_short_flag_in_cluster(arg, blocked_prefixes) {
                 return Err(format!(
-                    "'{}' flag on '{}' is not allowed (writes files in place; found in combined flags '{}')",
+                    "'{}' flag on '{}' is not allowed (found in combined flags '{}')",
                     matched, cmd, arg
                 ));
             }
@@ -720,32 +744,27 @@ pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// Check if a combined short-flag cluster (e.g., `-Hx`, `-nro`) contains
-/// any single-letter blocked flag (e.g., `-x` or `-o`).
+/// Check if a combined short-flag cluster (e.g., `-Hx`, `-nro`, `-Hxpython3`)
+/// contains any single-letter blocked flag (e.g., `-x` or `-o`).
 ///
-/// Only examines args that look like pure flag clusters: start with `-` (not `--`),
-/// at least 3 characters, and all characters after the dash are ASCII alphabetic.
-/// This avoids false positives on flags with embedded values like `-t:` or `-n3`.
+/// Only examines the leading run of ASCII letters after a single `-`, since a
+/// cluster may end in an attached value (`-Uj4` is `-U -j 4`). This can
+/// over-match a value's letters (`-lc` is `-l c`), which fails closed.
 fn find_blocked_short_flag_in_cluster<'a>(arg: &str, blocked: &[&'a str]) -> Option<&'a str> {
-    // Must be a short-flag group: starts with -, not --, at least 2 flag letters
     if !arg.starts_with('-') || arg.starts_with("--") || arg.len() < 3 {
         return None;
     }
-    let after_dash = &arg[1..];
-    // A pure flag cluster is all ASCII alphabetic (no embedded values like -n3 or -f/path)
-    if !after_dash.chars().all(|c| c.is_ascii_alphabetic()) {
-        return None;
-    }
-    for flag in blocked {
-        // Only match single-letter short flags: exactly "-X" (2 chars, one dash + one letter)
-        if flag.len() == 2 && flag.starts_with('-') {
-            let blocked_char = flag.as_bytes()[1];
-            if after_dash.as_bytes().contains(&blocked_char) {
-                return Some(flag);
-            }
-        }
-    }
-    None
+    let letters: Vec<u8> = arg[1..]
+        .bytes()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    // Only match single-letter short flags: exactly "-X"
+    blocked
+        .iter()
+        .find(|flag| {
+            flag.len() == 2 && flag.starts_with('-') && letters.contains(&flag.as_bytes()[1])
+        })
+        .copied()
 }
 
 /// Convenience wrapper for `check_blocked_flags` when args are `&[String]`.

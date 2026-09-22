@@ -15,7 +15,7 @@ rsh closes that gap. It accepts a command string, parses it with [brush-parser](
 - No function definitions, background execution (`&`), or process substitution
 - Environment is sanitized — child processes only see safe variables (`HOME`, `PATH`, etc.)
 - No environment variable references in arguments (blocks `$SECRET`, `$HOME`, etc.)
-- Dangerous flags blocked (`find -delete`/`-exec`, `fd --exec`, `sort -o`)
+- Dangerous flags blocked (`find -delete`/`-exec`, `fd --exec`, `sort -o`, `ast-grep -U`/`-i`/`-c`)
 - Output is capped at 10MB by default
 
 **What rsh allows:**
@@ -124,14 +124,16 @@ Validation errors are written to stderr with an `rsh:` prefix. If output exceeds
 ### Command allowlist
 
 ```
-grep, rg, ugrep, find, fd, cat, bat, head, tail, ls, eza, stat, file, du, wc, pwd, which,
+grep, rg, ugrep, ast-grep, find, fd, cat, bat, head, tail, ls, eza, stat, file, du, wc, pwd, which,
 sort, uniq, cut, tr, diff, comm, basename, dirname, realpath, echo, printf, date, true, false,
 test, printenv
 ```
 
 The allowlist is pinned at compile time and cannot be changed at runtime. There is no `--allow` flag, no config file, and no environment variable override. This is intentional: instead of maintaining an ever-growing blocklist of dangerous commands (shells, scripting languages, tools that exec), only explicitly listed read-only commands can run.
 
-Dangerous flags on allowed commands are still blocked: `find -delete`/`-exec`/`-execdir`/`-fprint`/etc., `fd -x`/`--exec`/`-X`/`--exec-batch`, `sort -o`/`--output`.
+Dangerous flags on allowed commands are still blocked: `find -delete`/`-exec`/`-execdir`/`-fprint`/etc., `fd -x`/`--exec`/`-X`/`--exec-batch`, `sort -o`/`--output`, `ast-grep -U`/`--update-all`/`-i`/`--interactive`/`-c`/`--config`.
+
+ast-grep has extra restrictions because it auto-discovers `sgconfig.yml` from its working directory upward and `dlopen()`s any `customLanguages.*.libraryPath` in it, on every subcommand including plain `run`. rsh refuses to run ast-grep when an `sgconfig.yml` or `sgconfig.yaml` exists in the working directory or any parent, blocks `-c`/`--config`, and blocks the `new`, `lsp`, and `test` subcommands. The deprecated `sg` alias is not allowlisted because on Linux `sg` is the shadow-utils switch-group command.
 
 ## Security model
 
@@ -145,7 +147,7 @@ rsh is **defense in depth** — multiple independent layers, each sufficient to 
 | **Redirect gating** | Validate + Execute | File writes disabled by default; path checks on expanded targets when enabled |
 | **AST structural checks** | Validate | Function definitions, background `&`, process substitution, here-docs |
 | **Variable rejection** | Validate | All env var references blocked in arguments (blocks `$SECRET`, `$HOME`, etc.) |
-| **Blocked flags** | Validate + Execute | `find -delete`/`-exec`, `fd --exec`, `sort -o` — checked on literals and expanded args |
+| **Blocked flags** | Validate + Execute | `find -delete`/`-exec`, `fd --exec`, `sort -o`, `ast-grep -U`/`-c` — checked on literals and expanded args |
 | **Environment sanitization** | Execute | Only approved variables forwarded to child processes |
 | **Signal handling** | Execute | SIGINT/SIGTERM forwarded to children; exit 128+signal on signal death |
 | **Output limits** | Execute | Truncation prevents memory exhaustion from large output |
