@@ -3085,8 +3085,8 @@ fn test_ast_grep_non_write_flags_blocked_even_with_allow_redirects() {
 
 #[test]
 fn test_ast_grep_rewrite_with_allow_redirects() {
-    if Command::new("ast-grep").arg("--version").output().is_err() {
-        return; // ast-grep not installed
+    if !has_ast_grep() {
+        return;
     }
     let workdir = std::env::temp_dir().join("rsh_test_ast_grep_rewrite");
     std::fs::create_dir_all(&workdir).unwrap();
@@ -3160,62 +3160,89 @@ fn test_sg_alias_not_allowed() {
     assert_not_in_allowlist("sg -p x");
 }
 
-#[test]
-fn test_ast_grep_rejected_when_project_config_present() {
-    for (dir, name) in [
-        ("rsh_test_sgconfig_yml", "sgconfig.yml"),
-        ("rsh_test_sgconfig_yaml", "sgconfig.yaml"),
-    ] {
-        let workdir = std::env::temp_dir().join(dir);
-        let sub = workdir.join("sub");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(workdir.join(name), "customLanguages: {}\n").unwrap();
+fn has_ast_grep() -> bool {
+    Command::new("ast-grep").arg("--version").output().is_ok()
+}
 
-        // ast-grep walks up from its cwd, so a config in a parent counts too.
-        for d in [&workdir, &sub] {
-            let output = rsh_bin()
-                .arg("--dir")
-                .arg(d)
-                .arg("ast-grep run -p x")
-                .output()
-                .unwrap();
-            assert!(!output.status.success());
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("project config is present"),
-                "stderr: {}",
-                stderr
-            );
-        }
-        std::fs::remove_dir_all(&workdir).unwrap();
+/// A config whose custom language points at a library that doesn't exist, so
+/// ast-grep errors out if it ever loads the discovered config.
+const EVIL_SGCONFIG: &str =
+    "customLanguages:\n  evil:\n    libraryPath: evil.so\n    extensions: [evil]\n";
+
+#[test]
+fn test_ast_grep_ignores_discovered_project_config() {
+    if !has_ast_grep() {
+        return;
     }
+    let workdir = std::env::temp_dir().join("rsh_test_sgconfig_ignored");
+    let sub = workdir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(workdir.join("sgconfig.yml"), EVIL_SGCONFIG).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    std::fs::write(sub.join("b.rs"), "fn main() { let y = 1; }\n").unwrap();
+
+    let inline_rule =
+        "ast-grep scan --inline-rules 'id: x\nlanguage: rust\nrule: {pattern: let $X = 1}' .";
+    // ast-grep walks up from its cwd, so running in `sub` must also ignore the parent's config.
+    for (dir, cmd) in [
+        (&workdir, "ast-grep run -p 'let $X = 1' -l rust ."),
+        (&workdir, "ast-grep -p 'let $X = 1' -l rust ."),
+        (&workdir, inline_rule),
+        (&workdir, "ast-grep outline a.rs"),
+        (&workdir, "ast-grep --version"),
+        (&workdir, "ast-grep --help"),
+        (&workdir, "ast-grep help run"),
+        (&workdir, "ast-grep completions zsh"),
+        (&sub, "ast-grep run -p 'let $X = 1' -l rust ."),
+    ] {
+        let output = rsh_bin().arg("--dir").arg(dir).arg(cmd).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} in {}: {}",
+            cmd,
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::remove_dir_all(&workdir).unwrap();
 }
 
 #[test]
-fn test_ast_grep_rejected_when_config_written_earlier_in_script() {
+fn test_ast_grep_ignores_config_written_earlier_in_script() {
+    if !has_ast_grep() {
+        return;
+    }
     let workdir = std::env::temp_dir().join("rsh_test_sgconfig_written");
     let _ = std::fs::remove_dir_all(&workdir);
     std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
     let output = rsh_bin()
         .arg("--allow-redirects")
         .arg("--dir")
         .arg(&workdir)
-        .arg("echo 'customLanguages: {}' > sgconfig.yml; ast-grep run -p x")
+        .arg(format!(
+            "printf '{}' > sgconfig.yml; ast-grep run -p 'let $X = 1' -l rust .",
+            EVIL_SGCONFIG.replace('\n', "\\n")
+        ))
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("project config is present"),
+        output.status.success(),
         "stderr: {}",
-        stderr
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(workdir.join("sgconfig.yml"))
+            .unwrap()
+            .contains("libraryPath")
     );
     std::fs::remove_dir_all(&workdir).unwrap();
 }
 
 #[test]
 fn test_ast_grep_search_works() {
-    if Command::new("ast-grep").arg("--version").output().is_err() {
-        return; // ast-grep not installed
+    if !has_ast_grep() {
+        return;
     }
     let workdir = std::env::temp_dir().join("rsh_test_ast_grep_search");
     std::fs::create_dir_all(&workdir).unwrap();

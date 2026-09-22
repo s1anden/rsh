@@ -95,7 +95,7 @@ sed (restricted — line extraction only):
 Not allowed:
 - Commands outside the allowlist above — the allowlist is fixed and cannot be changed
 - find -exec / -execdir (use command substitution or for-loops instead)
-- ast-grep -i / -c, ast-grep new / lsp / test, and ast-grep in any directory with an sgconfig.yml{ast_grep_write_note}
+- ast-grep -i / -c and ast-grep new / lsp / test (sgconfig.yml project rules are ignored; use scan -r rule.yml){ast_grep_write_note}
 - Instead of: find . | xargs grep pattern → use: grep -r pattern . OR grep pattern $(find . -name '*.ext')
 - Function definitions, background execution (&), process substitution{redirect_note}
 

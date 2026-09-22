@@ -556,9 +556,11 @@ impl Executor {
         // for-loop variables, globs) can produce blocked flags at runtime.
         validator::check_blocked_flags_expanded(&name, &args, self.allow_redirects)?;
 
-        if name == "ast-grep" {
-            self.check_no_ast_grep_config()?;
-        }
+        let args = if name == "ast-grep" {
+            ast_grep_args(args)
+        } else {
+            args
+        };
 
         Ok((name, args, redirects, stderr_behavior))
     }
@@ -1062,27 +1064,6 @@ impl Executor {
 
     // --- Path checking ---
 
-    /// ast-grep auto-discovers sgconfig.yml from its cwd upward and dlopen()s any
-    /// `customLanguages.*.libraryPath` in it, even for plain `ast-grep run`.
-    /// Checked right before spawn so an earlier `echo > sgconfig.yml` is caught.
-    fn check_no_ast_grep_config(&self) -> Result<(), String> {
-        let dir = self
-            .working_dir
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve working directory: {}", e))?;
-        for ancestor in dir.ancestors() {
-            for name in ["sgconfig.yml", "sgconfig.yaml"] {
-                if ancestor.join(name).exists() {
-                    return Err(format!(
-                        "ast-grep is not allowed when an ast-grep project config is present ({}); it can load native code",
-                        ancestor.join(name).display()
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Check expanded argument values for absolute paths and path traversal.
     fn check_expanded_arg_path(&self, arg: &str) -> Result<(), String> {
         validator::check_arg_path_safety(arg)
@@ -1278,5 +1259,73 @@ fn shell_pattern_matches(pattern: &str, value: &str) -> bool {
     match glob_pattern {
         Ok(p) => p.matches(value),
         Err(_) => pattern == value,
+    }
+}
+
+/// ast-grep auto-discovers sgconfig.yml from its cwd upward and dlopen()s any
+/// `customLanguages.*.libraryPath` in it, before parsing args, for every
+/// subcommand. It skips discovery when argv contains `-c <file>`, so we always
+/// pass an empty config (user `-c` is blocked, so nothing overrides it).
+/// Placement only matters for clap accepting the command, not for safety.
+fn ast_grep_args(args: Vec<String>) -> Vec<String> {
+    let config = ["-c".to_string(), "/dev/null".to_string()];
+    let first = args.first().map(String::as_str).unwrap_or("");
+    let mut out = Vec::with_capacity(args.len() + 3);
+    match first {
+        "run" | "scan" | "outline" | "completions" => {
+            out.push(args[0].clone());
+            out.extend(config);
+            out.extend_from_slice(&args[1..]);
+        }
+        // Default-run form (`ast-grep -p x`) rejects -c, so make `run` explicit.
+        f if f.starts_with('-') && !matches!(f, "-h" | "--help" | "-V" | "--version") => {
+            out.push("run".to_string());
+            out.extend(config);
+            out.extend(args);
+        }
+        _ => {
+            out.extend(config);
+            out.extend(args);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ast_grep_args;
+
+    fn rewrite(args: &[&str]) -> Vec<String> {
+        ast_grep_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn test_ast_grep_args_inject_empty_config() {
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["run", "-p", "x"], &["run", "-c", "/dev/null", "-p", "x"]),
+            (
+                &["scan", "-r", "r.yml"],
+                &["scan", "-c", "/dev/null", "-r", "r.yml"],
+            ),
+            (
+                &["outline", "a.rs"],
+                &["outline", "-c", "/dev/null", "a.rs"],
+            ),
+            (
+                &["completions", "zsh"],
+                &["completions", "-c", "/dev/null", "zsh"],
+            ),
+            (
+                &["-p", "x", "."],
+                &["run", "-c", "/dev/null", "-p", "x", "."],
+            ),
+            (&["--help"], &["-c", "/dev/null", "--help"]),
+            (&["-V"], &["-c", "/dev/null", "-V"]),
+            (&["help", "run"], &["-c", "/dev/null", "help", "run"]),
+            (&[], &["-c", "/dev/null"]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rewrite(input), *expected, "input: {:?}", input);
+        }
     }
 }

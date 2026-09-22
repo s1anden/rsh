@@ -133,7 +133,7 @@ The allowlist is pinned at compile time and cannot be changed at runtime. There 
 
 Dangerous flags on allowed commands are still blocked: `find -delete`/`-exec`/`-execdir`/`-fprint`/etc., `fd -x`/`--exec`/`-X`/`--exec-batch`, `sort -o`/`--output`, `ast-grep -i`/`--interactive`/`-c`/`--config`. `ast-grep -U`/`--update-all` (rewrite in place) is allowed only with `--allow-redirects`.
 
-ast-grep has extra restrictions because it auto-discovers `sgconfig.yml` from its working directory upward and `dlopen()`s any `customLanguages.*.libraryPath` in it, on every subcommand including plain `run`. rsh refuses to run ast-grep when an `sgconfig.yml` or `sgconfig.yaml` exists in the working directory or any parent, blocks `-c`/`--config`, and blocks the `new`, `lsp`, and `test` subcommands. The deprecated `sg` alias is not allowlisted because on Linux `sg` is the shadow-utils switch-group command.
+ast-grep has extra handling because it auto-discovers `sgconfig.yml` from its working directory upward and `dlopen()`s any `customLanguages.*.libraryPath` in it, on every subcommand including plain `run` and `--version`. rsh always passes `-c /dev/null` (an empty config), which turns off discovery, and blocks user-supplied `-c`/`--config`. ast-grep works in projects that have an `sgconfig.yml`, but project rules, custom languages, and `languageGlobs` from it are not used; pass rule files with `scan -r`. The `new`, `lsp`, and `test` subcommands are blocked. The deprecated `sg` alias is not allowlisted because on Linux `sg` is the shadow-utils switch-group command.
 
 ## Security model
 
