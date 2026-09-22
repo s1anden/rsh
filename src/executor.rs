@@ -554,7 +554,7 @@ impl Executor {
         // Re-check blocked flags on expanded args. The validator checks
         // literal Word.value strings, but expansion (command substitution,
         // for-loop variables, globs) can produce blocked flags at runtime.
-        validator::check_blocked_flags_expanded(&name, &args)?;
+        validator::check_blocked_flags_expanded(&name, &args, self.allow_redirects)?;
 
         if name == "ast-grep" {
             self.check_no_ast_grep_config()?;

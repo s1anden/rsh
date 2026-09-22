@@ -3057,6 +3057,65 @@ fn test_ast_grep_write_and_config_flags_blocked() {
 }
 
 #[test]
+fn test_ast_grep_rewrite_requires_allow_redirects() {
+    assert_rejected_with(
+        "ast-grep run -p x -r y -U",
+        "'-U' flag on 'ast-grep' is not allowed without --allow-redirects",
+    );
+}
+
+#[test]
+fn test_ast_grep_non_write_flags_blocked_even_with_allow_redirects() {
+    for cmd in [
+        "ast-grep run -p x -r y -i",
+        "ast-grep run -p x -r y -Ui",
+        "ast-grep run -p x -r y -U -c cfg.yml",
+        "ast-grep new project",
+    ] {
+        let output = rsh_bin()
+            .arg("--allow-redirects")
+            .arg(cmd)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{} should be rejected", cmd);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("not allowed"), "{}: {}", cmd, stderr);
+    }
+}
+
+#[test]
+fn test_ast_grep_rewrite_with_allow_redirects() {
+    if Command::new("ast-grep").arg("--version").output().is_err() {
+        return; // ast-grep not installed
+    }
+    let workdir = std::env::temp_dir().join("rsh_test_ast_grep_rewrite");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    for flags in ["-U", "-Uj1", "--update-all"] {
+        std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+        let output = rsh_bin()
+            .arg("--allow-redirects")
+            .arg("--dir")
+            .arg(&workdir)
+            .arg(format!(
+                "ast-grep run -p 'let $X = 1' -r 'let $X = 2' -l rust {} .",
+                flags
+            ))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            flags,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let contents = std::fs::read_to_string(workdir.join("a.rs")).unwrap();
+        assert!(contents.contains("let x = 2"), "{}: {}", flags, contents);
+    }
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
 fn test_ast_grep_flags_blocked_in_clusters() {
     // -Uj4 is parsed by clap as -U -j 4; the trailing value must not hide -U.
     assert_rejected_with("ast-grep run -p x -r y -jU4", "'-U' flag on 'ast-grep'");

@@ -29,20 +29,13 @@ const UNCONDITIONALLY_BLOCKED: &[(&str, &[&str])] = &[
 /// Flags blocked by prefix match (e.g., sort -o, sort -ofoo all blocked).
 const PREFIX_BLOCKED: &[(&str, &[&str])] = &[
     ("sort", &["-o", "--output"]),
-    // -U/-i rewrite files (and -i can spawn $EDITOR). -c loads a config whose
+    // -i needs a TTY and can spawn $EDITOR. -c loads a config whose
     // customLanguages.libraryPath is dlopen'd, i.e. arbitrary native code.
-    (
-        "ast-grep",
-        &[
-            "-U",
-            "--update-all",
-            "-i",
-            "--interactive",
-            "-c",
-            "--config",
-        ],
-    ),
+    ("ast-grep", &["-i", "--interactive", "-c", "--config"]),
 ];
+
+/// Flags that write files, blocked by prefix match unless --allow-redirects is set.
+const WRITE_GATED: &[(&str, &[&str])] = &[("ast-grep", &["-U", "--update-all"])];
 
 /// ast-grep subcommands that write files (new, test -U) or run a long-lived server (lsp).
 const AST_GREP_BLOCKED_SUBCOMMANDS: &[&str] = &["new", "lsp", "test"];
@@ -642,7 +635,7 @@ impl<'a> ValidatorContext<'a> {
 
     /// Check args against UNCONDITIONALLY_BLOCKED and PREFIX_BLOCKED for a command.
     fn check_blocked_flags(&self, cmd: &str, args: &[&str]) -> Result<(), String> {
-        check_blocked_flags(cmd, args)
+        check_blocked_flags(cmd, args, self.config.allow_redirects)
     }
 }
 
@@ -695,10 +688,10 @@ fn check_path_value(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Check args against UNCONDITIONALLY_BLOCKED and PREFIX_BLOCKED for a command.
-/// Used at validation time (on literal args) and at execution time (on expanded args)
+/// Check args against UNCONDITIONALLY_BLOCKED, PREFIX_BLOCKED, and (unless
+/// `allow_writes`) WRITE_GATED for a command. Used at validation time (on literal args) and at execution time (on expanded args)
 /// to catch blocked flags like `find -delete` or `sort -o`.
-pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
+pub fn check_blocked_flags(cmd: &str, args: &[&str], allow_writes: bool) -> Result<(), String> {
     // ast-grep's only top-level flags are -c (blocked), -h, -V, so the first
     // arg is always the subcommand or a flag.
     if cmd == "ast-grep"
@@ -723,22 +716,39 @@ pub fn check_blocked_flags(cmd: &str, args: &[&str]) -> Result<(), String> {
             }
         }
     }
-    if let Some((_, blocked_prefixes)) = PREFIX_BLOCKED.iter().find(|(c, _)| *c == cmd) {
-        for arg in args {
-            for prefix in *blocked_prefixes {
-                if arg.starts_with(prefix) {
-                    return Err(format!("'{}' flag on '{}' is not allowed", arg, cmd));
-                }
-            }
-            // Catch blocked single-letter prefix flags in combined clusters:
-            // e.g., `sort -ro file` is parsed by sort as `-r -o file`, bypassing
-            // the prefix check on `-o`.
-            if let Some(matched) = find_blocked_short_flag_in_cluster(arg, blocked_prefixes) {
+    check_prefixes(cmd, args, PREFIX_BLOCKED, "")?;
+    if !allow_writes {
+        check_prefixes(cmd, args, WRITE_GATED, " without --allow-redirects")?;
+    }
+    Ok(())
+}
+
+fn check_prefixes(
+    cmd: &str,
+    args: &[&str],
+    table: &[(&str, &[&str])],
+    reason: &str,
+) -> Result<(), String> {
+    let Some((_, blocked_prefixes)) = table.iter().find(|(c, _)| *c == cmd) else {
+        return Ok(());
+    };
+    for arg in args {
+        for prefix in *blocked_prefixes {
+            if arg.starts_with(prefix) {
                 return Err(format!(
-                    "'{}' flag on '{}' is not allowed (found in combined flags '{}')",
-                    matched, cmd, arg
+                    "'{}' flag on '{}' is not allowed{}",
+                    arg, cmd, reason
                 ));
             }
+        }
+        // Catch blocked single-letter prefix flags in combined clusters:
+        // e.g., `sort -ro file` is parsed by sort as `-r -o file`, bypassing
+        // the prefix check on `-o`.
+        if let Some(matched) = find_blocked_short_flag_in_cluster(arg, blocked_prefixes) {
+            return Err(format!(
+                "'{}' flag on '{}' is not allowed{} (found in combined flags '{}')",
+                matched, cmd, reason, arg
+            ));
         }
     }
     Ok(())
@@ -768,9 +778,13 @@ fn find_blocked_short_flag_in_cluster<'a>(arg: &str, blocked: &[&'a str]) -> Opt
 }
 
 /// Convenience wrapper for `check_blocked_flags` when args are `&[String]`.
-pub fn check_blocked_flags_expanded(cmd: &str, args: &[String]) -> Result<(), String> {
+pub fn check_blocked_flags_expanded(
+    cmd: &str,
+    args: &[String],
+    allow_writes: bool,
+) -> Result<(), String> {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    check_blocked_flags(cmd, &refs)
+    check_blocked_flags(cmd, &refs, allow_writes)
 }
 
 /// Check that a command name is present in the allowlist.

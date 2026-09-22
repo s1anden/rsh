@@ -50,6 +50,12 @@ pub fn prime_text(al: &Allowlist, allow_redirects: bool) -> String {
         "\n- File output redirects (> and >>)"
     };
 
+    let ast_grep_write_note = if allow_redirects {
+        ""
+    } else {
+        "\n- ast-grep -U (rewrites files)"
+    };
+
     let mut s = format!(
         "\
 Prefer rsh to bash for read-only shell operations that may require permission. rsh works like bash but only permits specific commands.
@@ -89,7 +95,7 @@ sed (restricted — line extraction only):
 Not allowed:
 - Commands outside the allowlist above — the allowlist is fixed and cannot be changed
 - find -exec / -execdir (use command substitution or for-loops instead)
-- ast-grep -U / -i / -c, ast-grep new / lsp / test, and ast-grep in any directory with an sgconfig.yml
+- ast-grep -i / -c, ast-grep new / lsp / test, and ast-grep in any directory with an sgconfig.yml{ast_grep_write_note}
 - Instead of: find . | xargs grep pattern → use: grep -r pattern . OR grep pattern $(find . -name '*.ext')
 - Function definitions, background execution (&), process substitution{redirect_note}
 
@@ -111,6 +117,11 @@ Patterns for multi-step reads:\n"
     }
     if has_ast_grep {
         s.push_str("  ast-grep -p 'fn $NAME($$$)' -l rust .     # structural (AST) search\n");
+        if allow_redirects {
+            s.push_str(
+                "  ast-grep -p 'foo($A)' -r 'bar($A)' -l ts -U .  # structural rewrite in place\n",
+            );
+        }
     }
     s.push_str(
         "  tree -L 2 .                                    # overview of directory structure\n",
@@ -196,7 +207,7 @@ fn usage() {
     eprintln!("       rsh [OPTIONS] -- <COMMAND> [ARGS...]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --allow-redirects   Allow output redirects (> and >>)");
+    eprintln!("  --allow-redirects   Allow output redirects (> and >>) and ast-grep -U rewrites");
     eprintln!("  --max-output <n>    Max output bytes (default: 10485760 = 10MB)");
     eprintln!("  --inherit-env       Inherit full parent environment (default: sanitized)");
     eprintln!("  --dir <path>        Working directory (default: cwd)");
