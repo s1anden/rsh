@@ -774,17 +774,7 @@ fn find_blocked_short_flag_in_cluster<'a>(
     if !arg.starts_with('-') || arg.starts_with("--") || arg.len() < 3 {
         return None;
     }
-    let value_flags = SHORT_VALUE_FLAGS
-        .iter()
-        .find(|(c, _)| *c == cmd)
-        .map_or("", |(_, f)| *f);
-    let mut letters = Vec::new();
-    for c in arg[1..].bytes().take_while(|c| c.is_ascii_alphabetic()) {
-        letters.push(c);
-        if value_flags.as_bytes().contains(&c) {
-            break;
-        }
-    }
+    let letters = short_cluster_flags(cmd, arg);
     // Only match single-letter short flags: exactly "-X"
     blocked
         .iter()
@@ -792,6 +782,26 @@ fn find_blocked_short_flag_in_cluster<'a>(
             flag.len() == 2 && flag.starts_with('-') && letters.contains(&flag.as_bytes()[1])
         })
         .copied()
+}
+
+/// The short-flag letters in a single-dash arg as `cmd` would parse them: the
+/// leading ASCII letters, up to and including the first value-taking flag.
+pub fn short_cluster_flags(cmd: &str, arg: &str) -> Vec<u8> {
+    let mut letters = Vec::new();
+    if !arg.starts_with('-') || arg.starts_with("--") {
+        return letters;
+    }
+    let value_flags = SHORT_VALUE_FLAGS
+        .iter()
+        .find(|(c, _)| *c == cmd)
+        .map_or("", |(_, f)| *f);
+    for c in arg[1..].bytes().take_while(|c| c.is_ascii_alphabetic()) {
+        letters.push(c);
+        if value_flags.as_bytes().contains(&c) {
+            break;
+        }
+    }
+    letters
 }
 
 /// Convenience wrapper for `check_blocked_flags` when args are `&[String]`.

@@ -8,6 +8,8 @@
 /// copy matters: if ast-grep re-read the project file, a concurrent writer
 /// (`ast-grep -U` in another pipeline stage or rsh process) could swap in
 /// `customLanguages` after the check. User `-c` is blocked in the validator.
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -38,27 +40,68 @@ impl Drop for TempConfig {
     }
 }
 
+/// Validated config copies for one command, keyed by their contents, so a
+/// loop reuses one file instead of writing one per iteration.
+pub type ConfigCache = HashMap<String, TempConfig>;
+
 /// Resolve and validate the project config, then insert `-c <config>` into
-/// args. Keep the returned TempConfig alive until ast-grep exits.
+/// args. The config is re-read and re-validated on every call; `cache` must
+/// outlive the ast-grep process.
 pub fn prepare_args(
     args: Vec<String>,
     working_dir: &Path,
-) -> Result<(Vec<String>, Option<TempConfig>), String> {
+    cache: &mut ConfigCache,
+) -> Result<Vec<String>, String> {
     let Some(path) = find_config(working_dir)? else {
-        return Ok((inject_config(args, "/dev/null"), None));
+        check_needs_project(&args)?;
+        return Ok(inject_config(args, "/dev/null"));
     };
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
     let project_dir = path.parent().expect("config path has a parent");
     let sanitized =
         sanitize_config(&text, project_dir).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let temp = write_temp_config(&sanitized)?;
+    let temp = match cache.entry(sanitized) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => {
+            let temp = write_temp_config(e.key())?;
+            e.insert(temp)
+        }
+    };
     let temp_str = temp
         .0
         .to_str()
         .ok_or_else(|| format!("non-UTF-8 temp path {}", temp.0.display()))?
         .to_string();
-    Ok((inject_config(args, &temp_str), Some(temp)))
+    Ok(inject_config(args, &temp_str))
+}
+
+/// Without a project, ast-grep errors on `test` and on `scan` with no rule
+/// given. The injected empty config would make those silently succeed.
+fn check_needs_project(args: &[String]) -> Result<(), String> {
+    let needs_project = match args.first().map(String::as_str) {
+        Some("test") => true,
+        Some("scan") => !args[1..].iter().any(|a| {
+            a == "--rule"
+                || a.starts_with("--rule=")
+                || a == "--inline-rules"
+                || a.starts_with("--inline-rules=")
+                || validator::short_cluster_flags("ast-grep", a).contains(&b'r')
+        }),
+        _ => false,
+    };
+    if needs_project {
+        let hint = if args[0] == "scan" {
+            " (pass -r <rule.yml> or --inline-rules)"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "'ast-grep {}' needs a project config, but no sgconfig.yml was found{}",
+            args[0], hint
+        ));
+    }
+    Ok(())
 }
 
 fn write_temp_config(contents: &str) -> Result<TempConfig, String> {
@@ -328,6 +371,65 @@ languageInjections:
         let v: Value = serde_yaml::from_str(&out).unwrap();
         assert_eq!(v["testConfigs"][0]["testDir"], "/proj/tests");
         assert_eq!(v["testConfigs"][0]["snapshotDir"], "snaps");
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_needs_project_without_config() {
+        for args in [
+            &["test"][..],
+            &["test", "--skip-snapshot-tests"],
+            &["scan"],
+            &["scan", "--json"],
+            &["scan", "--filter", "x"],
+        ] {
+            let err = check_needs_project(&strings(args)).expect_err(&format!("{:?}", args));
+            assert!(err.contains("needs a project config"), "{}", err);
+        }
+        for args in [
+            &["scan", "-r", "r.yml"][..],
+            &["scan", "-rr.yml"],
+            &["scan", "-Ur", "r.yml"],
+            &["scan", "--rule", "r.yml"],
+            &["scan", "--rule=r.yml"],
+            &["scan", "--inline-rules", "id: x"],
+            &["scan", "--inline-rules=id: x"],
+            &["run", "-p", "x"],
+            &["-p", "x"],
+            &["outline", "a.rs"],
+            &["--version"],
+            &[],
+        ] {
+            assert!(check_needs_project(&strings(args)).is_ok(), "{:?}", args);
+        }
+    }
+
+    #[test]
+    fn test_prepare_args_reuses_copy_for_same_config() {
+        let dir = std::env::temp_dir().join("rsh_unit_sgconfig_cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sgconfig.yml"), "ruleDirs: [rules]\n").unwrap();
+        let mut cache = ConfigCache::new();
+        let a = prepare_args(strings(&["run", "-p", "x"]), &dir, &mut cache).unwrap();
+        let b = prepare_args(strings(&["run", "-p", "y"]), &dir, &mut cache).unwrap();
+        assert_eq!(a[2], b[2], "same config should reuse the copy");
+        assert_eq!(cache.len(), 1);
+
+        // An edit is re-validated and gets its own copy.
+        std::fs::write(dir.join("sgconfig.yml"), "ruleDirs: [other]\n").unwrap();
+        let c = prepare_args(strings(&["run", "-p", "x"]), &dir, &mut cache).unwrap();
+        assert_ne!(a[2], c[2]);
+        std::fs::write(dir.join("sgconfig.yml"), "customLanguages: {}\n").unwrap();
+        assert!(prepare_args(strings(&["run", "-p", "x"]), &dir, &mut cache).is_err());
+
+        let paths: Vec<_> = cache.values().map(|t| t.0.clone()).collect();
+        drop(cache);
+        assert!(paths.iter().all(|p| !p.exists()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

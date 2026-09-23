@@ -3499,3 +3499,56 @@ fn test_ast_grep_config_swap_in_pipeline_not_loaded() {
     }
     std::fs::remove_dir_all(&workdir).unwrap();
 }
+
+#[test]
+fn test_ast_grep_scan_and_test_without_config_error() {
+    // With no sgconfig.yml, rsh's injected empty config would otherwise make
+    // these exit 0 with no output, which reads like a clean scan.
+    let workdir = std::env::temp_dir().join("rsh_test_ast_grep_no_config");
+    std::fs::create_dir_all(&workdir).unwrap();
+    for cmd in ["ast-grep scan", "ast-grep scan --json", "ast-grep test"] {
+        let output = rsh_bin()
+            .arg("--dir")
+            .arg(&workdir)
+            .arg(cmd)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{} should fail", cmd);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("needs a project config"),
+            "{}: {}",
+            cmd,
+            stderr
+        );
+    }
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_ast_grep_scan_with_rule_works_without_config() {
+    if !has_ast_grep() {
+        return;
+    }
+    let workdir = std::env::temp_dir().join("rsh_test_ast_grep_rule_no_config");
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.rs"), "fn main() { let x = 1; }\n").unwrap();
+    std::fs::write(
+        workdir.join("r.yml"),
+        "id: one\nlanguage: rust\nseverity: error\nmessage: m\nrule: {pattern: let $X = 1}\n",
+    )
+    .unwrap();
+    let output = rsh_bin()
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("ast-grep scan -r r.yml --report-style short a.rs")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("error[one]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(&workdir).unwrap();
+}

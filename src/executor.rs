@@ -98,7 +98,7 @@ pub struct Executor {
     inherit_env: bool,
     substitution_depth: std::cell::Cell<usize>,
     /// Validated ast-grep config copies, kept until the Executor is dropped.
-    ast_grep_configs: std::cell::RefCell<Vec<rsh_ast_grep::TempConfig>>,
+    ast_grep_configs: std::cell::RefCell<rsh_ast_grep::ConfigCache>,
 }
 
 impl Executor {
@@ -116,7 +116,7 @@ impl Executor {
             max_output,
             inherit_env,
             substitution_depth: std::cell::Cell::new(0),
-            ast_grep_configs: std::cell::RefCell::new(Vec::new()),
+            ast_grep_configs: std::cell::RefCell::default(),
         }
     }
 
@@ -561,9 +561,11 @@ impl Executor {
         validator::check_blocked_flags_expanded(&name, &args, self.allow_redirects)?;
 
         let args = if name == "ast-grep" {
-            let (args, config) = rsh_ast_grep::prepare_args(args, &self.working_dir)?;
-            self.ast_grep_configs.borrow_mut().extend(config);
-            args
+            rsh_ast_grep::prepare_args(
+                args,
+                &self.working_dir,
+                &mut self.ast_grep_configs.borrow_mut(),
+            )?
         } else {
             args
         };
