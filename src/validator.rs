@@ -37,8 +37,14 @@ const PREFIX_BLOCKED: &[(&str, &[&str])] = &[
 /// Flags that write files, blocked by prefix match unless --allow-redirects is set.
 const WRITE_GATED: &[(&str, &[&str])] = &[("ast-grep", &["-U", "--update-all"])];
 
-/// ast-grep subcommands that write files (new, test -U) or run a long-lived server (lsp).
-const AST_GREP_BLOCKED_SUBCOMMANDS: &[&str] = &["new", "lsp", "test"];
+/// ast-grep subcommands that scaffold files (new) or run a long-lived server (lsp).
+const AST_GREP_BLOCKED_SUBCOMMANDS: &[&str] = &["new", "lsp"];
+
+/// Short flags that take a value, per command. In a cluster, clap treats
+/// everything after the first of these as its value (`-lcpp` is `-l cpp`), so
+/// later letters are not flags. Commands not listed fall back to scanning
+/// every leading letter, which can over-match but fails closed.
+const SHORT_VALUE_FLAGS: &[(&str, &str)] = &[("ast-grep", "pkrljABCtfc")];
 
 /// Configuration passed into the validator.
 pub struct ValidatorConfig {
@@ -708,7 +714,7 @@ pub fn check_blocked_flags(cmd: &str, args: &[&str], allow_writes: bool) -> Resu
             }
             // Catch blocked single-letter flags hidden in combined clusters:
             // e.g., `fd -Hx` is parsed by fd as `-H -x`, bypassing exact match on `-x`.
-            if let Some(matched) = find_blocked_short_flag_in_cluster(arg, blocked_flags) {
+            if let Some(matched) = find_blocked_short_flag_in_cluster(cmd, arg, blocked_flags) {
                 return Err(format!(
                     "'{}' flag on '{}' is not allowed (found in combined flags '{}')",
                     matched, cmd, arg
@@ -744,7 +750,7 @@ fn check_prefixes(
         // Catch blocked single-letter prefix flags in combined clusters:
         // e.g., `sort -ro file` is parsed by sort as `-r -o file`, bypassing
         // the prefix check on `-o`.
-        if let Some(matched) = find_blocked_short_flag_in_cluster(arg, blocked_prefixes) {
+        if let Some(matched) = find_blocked_short_flag_in_cluster(cmd, arg, blocked_prefixes) {
             return Err(format!(
                 "'{}' flag on '{}' is not allowed{} (found in combined flags '{}')",
                 matched, cmd, reason, arg
@@ -757,17 +763,28 @@ fn check_prefixes(
 /// Check if a combined short-flag cluster (e.g., `-Hx`, `-nro`, `-Hxpython3`)
 /// contains any single-letter blocked flag (e.g., `-x` or `-o`).
 ///
-/// Only examines the leading run of ASCII letters after a single `-`, since a
-/// cluster may end in an attached value (`-Uj4` is `-U -j 4`). This can
-/// over-match a value's letters (`-lc` is `-l c`), which fails closed.
-fn find_blocked_short_flag_in_cluster<'a>(arg: &str, blocked: &[&'a str]) -> Option<&'a str> {
+/// Examines the leading run of ASCII letters after a single `-`, since a
+/// cluster may end in an attached value (`-Uj4` is `-U -j 4`), and stops after
+/// the command's first value-taking flag (see SHORT_VALUE_FLAGS).
+fn find_blocked_short_flag_in_cluster<'a>(
+    cmd: &str,
+    arg: &str,
+    blocked: &[&'a str],
+) -> Option<&'a str> {
     if !arg.starts_with('-') || arg.starts_with("--") || arg.len() < 3 {
         return None;
     }
-    let letters: Vec<u8> = arg[1..]
-        .bytes()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect();
+    let value_flags = SHORT_VALUE_FLAGS
+        .iter()
+        .find(|(c, _)| *c == cmd)
+        .map_or("", |(_, f)| *f);
+    let mut letters = Vec::new();
+    for c in arg[1..].bytes().take_while(|c| c.is_ascii_alphabetic()) {
+        letters.push(c);
+        if value_flags.as_bytes().contains(&c) {
+            break;
+        }
+    }
     // Only match single-letter short flags: exactly "-X"
     blocked
         .iter()

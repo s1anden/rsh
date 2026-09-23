@@ -54,7 +54,7 @@ pub fn prime_text(al: &Allowlist, allow_redirects: bool) -> String {
     let ast_grep_write_note = if allow_redirects {
         ""
     } else {
-        "\n- ast-grep -U (rewrites files)"
+        "\n- ast-grep -U (rewrites files or test snapshots)"
     };
 
     let mut s = format!(
@@ -96,7 +96,7 @@ sed (restricted — line extraction only):
 Not allowed:
 - Commands outside the allowlist above — the allowlist is fixed and cannot be changed
 - find -exec / -execdir (use command substitution or for-loops instead)
-- ast-grep -i / -c and ast-grep new / lsp / test (sgconfig.yml with customLanguages is rejected){ast_grep_write_note}
+- ast-grep -i / -c and ast-grep new / lsp (sgconfig.yml with customLanguages is rejected){ast_grep_write_note}
 - Instead of: find . | xargs grep pattern → use: grep -r pattern . OR grep pattern $(find . -name '*.ext')
 - Function definitions, background execution (&), process substitution{redirect_note}
 

@@ -29,9 +29,6 @@ const ALLOWED_KEYS: &[&str] = &[
 /// directory. The private copy lives elsewhere, so these are made absolute.
 const DIR_LIST_KEYS: &[&str] = &["ruleDirs", "utilDirs"];
 
-/// Dropped from the copy: only `ast-grep test` (blocked) reads it.
-const DROPPED_KEYS: &[&str] = &["testConfigs"];
-
 /// A validated config written to the temp dir; removed on drop.
 pub struct TempConfig(PathBuf);
 
@@ -132,10 +129,9 @@ fn sanitize_config(text: &str, project_dir: &Path) -> Result<String, String> {
                 ));
             }
         };
-        if DROPPED_KEYS.contains(&key.as_str()) {
-            continue;
-        }
-        let val = if DIR_LIST_KEYS.contains(&key.as_str()) {
+        let val = if key == "testConfigs" {
+            sanitize_test_configs(val, project_dir)?
+        } else if DIR_LIST_KEYS.contains(&key.as_str()) {
             let Value::Sequence(dirs) = val else {
                 return Err(format!("ast-grep config '{}' must be a list", key));
             };
@@ -144,13 +140,7 @@ fn sanitize_config(text: &str, project_dir: &Path) -> Result<String, String> {
                 let Value::String(dir) = dir else {
                     return Err(format!("ast-grep config '{}' entries must be strings", key));
                 };
-                validator::check_path_value(&dir)
-                    .map_err(|e| format!("ast-grep config '{}': {}", key, e))?;
-                let joined = project_dir.join(&dir);
-                let joined = joined
-                    .to_str()
-                    .ok_or_else(|| format!("non-UTF-8 path in '{}'", key))?;
-                abs.push(Value::String(joined.to_string()));
+                abs.push(project_path(&dir, project_dir, &key)?);
             }
             Value::Sequence(abs)
         } else {
@@ -162,6 +152,54 @@ fn sanitize_config(text: &str, project_dir: &Path) -> Result<String, String> {
         .map_err(|e| format!("cannot serialize ast-grep config: {}", e))
 }
 
+/// Validate `dir` as a project-relative path and return it joined onto `project_dir`.
+fn project_path(dir: &str, project_dir: &Path, key: &str) -> Result<Value, String> {
+    validator::check_path_value(dir).map_err(|e| format!("ast-grep config '{}': {}", key, e))?;
+    let joined = project_dir.join(dir);
+    let joined = joined
+        .to_str()
+        .ok_or_else(|| format!("non-UTF-8 path in '{}'", key))?;
+    Ok(Value::String(joined.to_string()))
+}
+
+/// `testConfigs` entries: `testDir` is resolved from the config's directory,
+/// so it is made absolute; `snapshotDir` is relative to `testDir`, so it is
+/// only validated.
+fn sanitize_test_configs(val: Value, project_dir: &Path) -> Result<Value, String> {
+    let Value::Sequence(entries) = val else {
+        return Err("ast-grep config 'testConfigs' must be a list".to_string());
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Value::Mapping(entry) = entry else {
+            return Err("ast-grep config 'testConfigs' entries must be mappings".to_string());
+        };
+        let mut clean = Mapping::new();
+        for (k, v) in entry {
+            let (Value::String(k), Value::String(v)) = (&k, &v) else {
+                return Err("ast-grep config 'testConfigs' entries must map strings".to_string());
+            };
+            let v = match k.as_str() {
+                "testDir" => project_path(v, project_dir, "testConfigs.testDir")?,
+                "snapshotDir" => {
+                    validator::check_path_value(v)
+                        .map_err(|e| format!("ast-grep config 'testConfigs.snapshotDir': {}", e))?;
+                    Value::String(v.clone())
+                }
+                other => {
+                    return Err(format!(
+                        "ast-grep config 'testConfigs' key '{}' is not allowed",
+                        other
+                    ));
+                }
+            };
+            clean.insert(Value::String(k.clone()), v);
+        }
+        out.push(Value::Mapping(clean));
+    }
+    Ok(Value::Sequence(out))
+}
+
 /// Placement only matters for clap accepting the command: ast-grep's config
 /// pre-scan sees `-c` anywhere in argv.
 fn inject_config(args: Vec<String>, config: &str) -> Vec<String> {
@@ -169,7 +207,7 @@ fn inject_config(args: Vec<String>, config: &str) -> Vec<String> {
     let first = args.first().map(String::as_str).unwrap_or("");
     let mut out = Vec::with_capacity(args.len() + 3);
     match first {
-        "run" | "scan" | "outline" | "completions" => {
+        "run" | "scan" | "outline" | "test" | "completions" => {
             out.push(args[0].clone());
             out.extend(flag);
             out.extend_from_slice(&args[1..]);
@@ -217,6 +255,7 @@ mod tests {
                 &["run", "-c", "/dev/null", "-p", "x", "."],
             ),
             (&["--help"], &["-c", "/dev/null", "--help"]),
+            (&["test"], &["test", "-c", "/dev/null"]),
             (&["-V"], &["-c", "/dev/null", "-V"]),
             (&["help", "run"], &["-c", "/dev/null", "help", "run"]),
             (&[], &["-c", "/dev/null"]),
@@ -247,7 +286,7 @@ mod tests {
         );
         assert_eq!(v["languageGlobs"]["html"][0], "*.vue");
         assert!(v.get("languageInjections").is_some());
-        assert!(v.get("testConfigs").is_none());
+        assert_eq!(v["testConfigs"][0]["testDir"], "/proj/tests");
         assert_eq!(check_config("").unwrap().trim(), "{}");
     }
 
@@ -256,6 +295,7 @@ mod tests {
         let rules = check_config("ruleDirs:\n- rules\ntestConfigs:\n- testDir: tests\n").unwrap();
         let v: Value = serde_yaml::from_str(&rules).unwrap();
         assert_eq!(v["ruleDirs"][0], "/proj/rules");
+        assert_eq!(v["testConfigs"][0]["testDir"], "/proj/tests");
 
         let vue = r#"languageGlobs:
   html:
@@ -279,6 +319,15 @@ languageInjections:
         // Data keys must round-trip unchanged, regex escapes included.
         assert_eq!(v["languageInjections"], original["languageInjections"]);
         assert_eq!(v["languageGlobs"], original["languageGlobs"]);
+    }
+
+    #[test]
+    fn test_sanitize_config_keeps_snapshot_dir_relative() {
+        let out =
+            check_config("testConfigs:\n  - testDir: tests\n    snapshotDir: snaps\n").unwrap();
+        let v: Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(v["testConfigs"][0]["testDir"], "/proj/tests");
+        assert_eq!(v["testConfigs"][0]["snapshotDir"], "snaps");
     }
 
     #[test]
@@ -309,6 +358,18 @@ languageInjections:
             ("ruleDirs: [1]\n", "must be strings"),
             ("- ruleDirs\n", "must be a mapping"),
             ("ruleDirs: [a]\nruleDirs: [b]\n", "could not be parsed"),
+            ("testConfigs: [{testDir: /etc}]\n", "absolute path"),
+            (
+                "testConfigs: [{testDir: t, snapshotDir: ../s}]\n",
+                "path traversal",
+            ),
+            (
+                "testConfigs: [{testDir: t, other: x}]\n",
+                "'other' is not allowed",
+            ),
+            ("testConfigs: [tests]\n", "must be mappings"),
+            ("testConfigs: {testDir: t}\n", "must be a list"),
+            ("testConfigs: [{testDir: [t]}]\n", "must map strings"),
             ("ruleDirs: [\n", "could not be parsed"),
         ] {
             let err = check_config(bad).expect_err(bad);

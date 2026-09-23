@@ -3071,6 +3071,7 @@ fn test_ast_grep_non_write_flags_blocked_even_with_allow_redirects() {
         "ast-grep run -p x -r y -Ui",
         "ast-grep run -p x -r y -U -c cfg.yml",
         "ast-grep new project",
+        "ast-grep lsp",
     ] {
         let output = rsh_bin()
             .arg("--allow-redirects")
@@ -3118,12 +3119,36 @@ fn test_ast_grep_rewrite_with_allow_redirects() {
 #[test]
 fn test_ast_grep_flags_blocked_in_clusters() {
     // -Uj4 is parsed by clap as -U -j 4; the trailing value must not hide -U.
-    assert_rejected_with("ast-grep run -p x -r y -jU4", "'-U' flag on 'ast-grep'");
     assert_rejected_with(
         "ast-grep run -p x -r y -Uj4",
         "flag on 'ast-grep' is not allowed",
     );
-    assert_rejected_with("ast-grep run -p x -r y -iU", "not allowed");
+    assert_rejected_with(
+        "ast-grep run -p x -r y -iU",
+        "flag on 'ast-grep' is not allowed",
+    );
+    assert_rejected_with(
+        "ast-grep run -p x -r y -Ui",
+        "flag on 'ast-grep' is not allowed",
+    );
+    assert_rejected_with("ast-grep test -Ufx", "not allowed");
+}
+
+#[test]
+fn test_ast_grep_letters_after_value_flag_are_not_flags() {
+    // clap reads everything after a value-taking short flag as its value:
+    // -lcpp is `-l cpp`, -jU4 is `-j U4` (a bad thread count, not -U).
+    for cmd in [
+        "ast-grep run -p x -lc .",
+        "ast-grep run -p x -lcpp .",
+        "ast-grep run -p x -lcsharp .",
+        "ast-grep run -p x -ljavascript .",
+        "ast-grep run -p x -r y -jU4 .",
+    ] {
+        let output = rsh_bin().arg(cmd).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("not allowed"), "{}: {}", cmd, stderr);
+    }
 }
 
 #[test]
@@ -3137,7 +3162,7 @@ fn test_ast_grep_flags_blocked_after_expansion() {
 
 #[test]
 fn test_ast_grep_blocked_subcommands() {
-    for sub in ["new", "lsp", "test"] {
+    for sub in ["new", "lsp"] {
         assert_rejected_with(&format!("ast-grep {}", sub), &format!("'ast-grep {}'", sub));
     }
     assert_rejected_with(
@@ -3328,6 +3353,117 @@ fn test_ast_grep_search_works() {
 fn test_fd_exec_blocked_in_cluster_with_attached_value() {
     // fd -Hxpython3 is -H -x python3; the digit must not hide -x.
     assert_rejected_with("fd -Hxpython3 .", "'-x' flag on 'fd'");
+}
+
+/// Project with one rule and a test case for it, under a unique temp dir.
+fn ast_grep_test_project(name: &str, valid: &str) -> std::path::PathBuf {
+    let workdir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&workdir);
+    std::fs::create_dir_all(workdir.join("rules")).unwrap();
+    std::fs::create_dir_all(workdir.join("tests")).unwrap();
+    std::fs::write(
+        workdir.join("sgconfig.yml"),
+        "ruleDirs: [rules]\ntestConfigs:\n  - testDir: tests\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workdir.join("rules/no-one.yml"),
+        "id: no-one\nlanguage: rust\nseverity: error\nmessage: no one\nrule: {pattern: let $X = 1}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workdir.join("tests/no-one-test.yml"),
+        format!(
+            "id: no-one\nvalid:\n  - \"{}\"\ninvalid:\n  - \"fn f() {{ let x = 1; }}\"\n",
+            valid
+        ),
+    )
+    .unwrap();
+    workdir
+}
+
+#[test]
+fn test_ast_grep_test_runs_project_tests() {
+    if !has_ast_grep() {
+        return;
+    }
+    let workdir = ast_grep_test_project("rsh_test_ast_grep_test_pass", "fn f() { let x = 2; }");
+    // testDir comes from the project config, so it must resolve from a subdirectory too.
+    for dir in [workdir.clone(), workdir.join("tests")] {
+        let output = rsh_bin()
+            .arg("--dir")
+            .arg(&dir)
+            .arg("ast-grep test --skip-snapshot-tests")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "in {}: stdout: {} stderr: {}",
+            dir.display(),
+            stdout,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Without snapshots, invalid cases fail and nothing is written.
+    let output = rsh_bin()
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("ast-grep test")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!workdir.join("tests/__snapshots__").exists());
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_ast_grep_test_reports_failures() {
+    if !has_ast_grep() {
+        return;
+    }
+    // A "valid" case the rule actually matches must fail.
+    let workdir = ast_grep_test_project("rsh_test_ast_grep_test_fail", "fn f() { let y = 1; }");
+    let output = rsh_bin()
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("ast-grep test --skip-snapshot-tests")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("FAIL"));
+    std::fs::remove_dir_all(&workdir).unwrap();
+}
+
+#[test]
+fn test_ast_grep_test_update_snapshots_requires_allow_redirects() {
+    assert_rejected_with("ast-grep test -U", "without --allow-redirects");
+    assert_rejected_with("ast-grep test --update-all", "without --allow-redirects");
+    assert_rejected_with("ast-grep test -i", "'-i' flag on 'ast-grep'");
+    if !has_ast_grep() {
+        return;
+    }
+    let workdir = ast_grep_test_project("rsh_test_ast_grep_test_snap", "fn f() { let x = 2; }");
+    let output = rsh_bin()
+        .arg("--allow-redirects")
+        .arg("--dir")
+        .arg(&workdir)
+        .arg("ast-grep test -U")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Snapshots land in the project's testDir, not next to rsh's temp config copy.
+    assert!(
+        workdir
+            .join("tests/__snapshots__/no-one-snapshot.yml")
+            .exists()
+    );
+    std::fs::remove_dir_all(&workdir).unwrap();
 }
 
 #[test]
