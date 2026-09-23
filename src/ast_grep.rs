@@ -252,6 +252,36 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_config_accepts_real_project_configs() {
+        let rules = check_config("ruleDirs:\n- rules\ntestConfigs:\n- testDir: tests\n").unwrap();
+        let v: Value = serde_yaml::from_str(&rules).unwrap();
+        assert_eq!(v["ruleDirs"][0], "/proj/rules");
+
+        let vue = r#"languageGlobs:
+  html:
+    - "**/*.vue"
+languageInjections:
+  - hostLanguage: html
+    injected: typescript
+    rule:
+      kind: raw_text
+      pattern: $CONTENT
+      inside:
+        kind: script_element
+        has:
+          kind: start_tag
+          has:
+            kind: attribute
+            regex: "^lang\\s*=\\s*['\"]?(ts|typescript)['\"]?$"
+"#;
+        let v: Value = serde_yaml::from_str(&check_config(vue).unwrap()).unwrap();
+        let original: Value = serde_yaml::from_str(vue).unwrap();
+        // Data keys must round-trip unchanged, regex escapes included.
+        assert_eq!(v["languageInjections"], original["languageInjections"]);
+        assert_eq!(v["languageGlobs"], original["languageGlobs"]);
+    }
+
+    #[test]
     fn test_temp_config_removed_on_drop() {
         let temp = write_temp_config("ruleDirs: []\n").unwrap();
         let path = temp.0.clone();
